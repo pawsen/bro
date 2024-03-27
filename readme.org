@@ -1,0 +1,152 @@
+#+title: Readme
+
+Running python on NixOS can be tricky. Here's how to do it, either using nix or pip.
+* Using nix
+
+#+begin_src nix :tangle shell.nix
+{ pkgs, ... }:
+
+let
+  pythonPackages = pkgs.python3Packages;
+
+  # install package from pypi
+  # types-networkx =
+  #   let
+  #     pname = "types-networkx";
+  #     version = "3.1.0.20231220";
+  #   in
+  #   pythonPackages.buildPythonPackage {
+  #     inherit pname version;
+  #     src = pkgs.fetchPypi {
+  #       inherit pname version;
+  #       sha256 = "sha256-ikAz9jGqoVEpob6MFNw6lj1/BL7Zev9kYJIBw5w0nN0=";
+  #     };
+  #     doCheck = false;
+  #   };
+in
+pkgs.mkShell {
+  buildInputs = with pythonPackages; [
+    python
+    # types-networkx
+    black
+    isort
+    numpy
+    # add additional packages
+  ] ++ [  ];
+}
+#+end_src
+
+#+begin_src nix :tangle flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  };
+
+  outputs = { nixpkgs, ... }:
+    let
+      forAllSystems = nixpkgs.lib.genAttrs [ "aarch64-linux" "x86_64-linux" ];
+    in
+    {
+      devShells = forAllSystems (system: {
+        default = nixpkgs.legacyPackages.${system}.callPackage ./shell.nix { };
+      });
+      packages = forAllSystems (system: {
+        default = nixpkgs.legacyPackages.${system}.callPackage ./default.nix { };
+      });
+    };
+}
+#+end_src
+
+#+begin_src nix :tangle default.nix
+{ python3Packages, ... }:
+
+with python3Packages;
+buildPythonApplication {
+  pname = "bro";
+  version = ".";
+  pyproject = false;
+  nativeBuildInputs = [
+    setuptools
+    wheel
+  ];
+  src = ./.;
+}
+
+#+end_src
+
+* Using venv/pip
+
+numpy installed into a =venv= using pip fails
+#+begin_src sh
+nix --offline run nixpkgs#python311 -- -m venv .venv --copies
+source .venv/bin/activate
+pip install numpy
+python -c 'import numpy'
+# . error
+#+end_src
+
+** Patching libraries/rpath. Preferred
+
+See this [[https://gist.github.com/GuillaumeDesforges/7d66cf0f63038724acf06f17331c9280][gist]] for a complete description
+
+numpy installed into a =venv= using pip fails
+#+begin_src sh
+nix --offline run nixpkgs#python311 -- -m venv .venv --copies
+source .venv/bin/activate
+pip install numpy
+python -c 'import numpy'
+# . error
+./fix-python --venv .venv
+python -c 'import numpy'
+# . works
+#+end_src
+
+
+When installing numpy using pip, there's a bunch of compiled files that are not properly linked
+#+begin_src sh
+nix shell nixpkgs#file --command find .venv/lib/python3.9/site-packages/numpy -type f -executable -exec sh -c "file -i '{}' | grep -qE 'x-(.*); charset=binary'" \; -print -exec sh -c "ldd '{}' | grep 'not found'" \;
+.venv/lib/python3.9/site-packages/numpy/linalg/_umath_linalg.cpython-39-x86_64-linux-gnu.so
+        libz.so.1 => not found
+.venv/lib/python3.9/site-packages/numpy/linalg/lapack_lite.cpython-39-x86_64-linux-gnu.so
+        libz.so.1 => not found
+.venv/lib/python3.9/site-packages/numpy/core/_simd.cpython-39-x86_64-linux-gnu.so
+.venv/lib/python3.9/site-packages/numpy/core/_multiarray_umath.cpython-39-x86_64-linux-gnu.so
+        libz.so.1 => not found
+#+end_src
+We see that =lapack_lite.cpython-39-x86_64-linux-gnu.so=, one of the binary files provided by the numpy wheel, does not find the libz.so.1 library.
+
+This can be fixed by fixing the =rpath=, as described in the gist above. The same guy made it into a tool,
+
+https://github.com/GuillaumeDesforges/fix-python/
+: nix shell github:GuillaumeDesforges/fix-python
+
+** setting LD_LIBRARY_PATH
+Instead of patching =rpath= in the compiled .so files, =LD_LIBRARY_PATH= can be changed. Something like
+#+begin_src nix
+{ pkgs ? import <nixpkgs> {} }:
+
+pkgs.mkShell {
+  nativeBuildInputs = [
+    pkgs.python3
+    pkgs.zlib
+  ];
+
+  shellHook = ''
+    export LD_LIBRARY_PATH="${pkgs.zlib}/lib"
+  '';
+}
+#+end_src
+
+https://github.com/LongerHV/nixos-configuration/tree/master/templates
+
+A downside of LD_LIBRARY_PATH is that you need to be able to set said environment variable for the process that will start Python.
+Another issues is that LD_LIBRARY_PATH affects all programs, which can inject the wrong libraries in correct build nix application that have an RPATH set in their executable.
+
+A better way might be to use [[https://github.com/Mic92/nix-ld][nix-ld]] to run unpatched dynamic binaries.
+
+* converting xls to csv
+
+#+begin_src sh
+nix shell nixpkgs#csvkit
+fd -e xls -x sh -c "in2csv {} > {.}.csv"
+#+end_src
